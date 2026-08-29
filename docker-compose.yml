@@ -1,0 +1,139 @@
+services:
+  proxy:
+    image: ${DOCKER_IMAGE_PROXY}
+    container_name: proxy-ingress-${APP_NAME}
+    init: true
+    restart: always
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4k,mode=1700,uid=100
+      - /run:rw,noexec,nosuid,nodev,size=4k,mode=1700,uid=100
+      - /var/log/nginx:rw,noexec,nosuid,nodev,size=4k,mode=1700,uid=100
+      - /var/lib/nginx/logs:rw,noexec,nosuid,nodev,size=4k,mode=1700,uid=100
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 128m
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 100
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 1024
+    healthcheck:
+      test: ["CMD", "curl", "-qsSLf", "https://qr.aardbeiplantje.link", "-o", "/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      external-ipv6:
+        ipv6_address: "${IPV6_ADDRESS}"
+      external-ipv4:
+      internal:
+    volumes:
+      - cert-volume:/certs:ro
+    environment:
+      TZ: GMT
+      LC_ALL: C.UTF-8
+      LANG: en_US.UTF-8
+      PERL5LIB: ""
+      APP_DOMAIN: "${DOMAIN}"
+
+  kc:
+    image: ${DOCKER_IMAGE_KC}
+    container_name: keycloak-${APP_NAME}
+    init: true
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+    mem_limit: 1g
+    memswap_limit: 1g
+    tmpfs:
+      - /dev/shm:size=128M,noexec,nosuid,nodev
+    networks:
+      - internal
+    volumes:
+      - ${KC_HTTPS_SITE_CRT}:/run/secrets/${KC_HOSTNAME}.crt:ro
+      - ${KC_HTTPS_SITE_KEY}:/run/secrets/${KC_HOSTNAME}.key:ro
+      - /dev/urandom:/dev/random:ro
+    environment:
+      KC_DB_URL: "jdbc:postgresql://pg:5432/${KC_POSTGRES_DB}"
+      KC_HOSTNAME: "${KC_HOSTNAME}"
+      KC_DB_USERNAME: "${KC_POSTGRES_USER}"
+      KC_DB_PASSWORD: "${KC_POSTGRES_PASSWORD}"
+      KEYCLOAK_ADMIN: "${KC_ADMIN_USER}"
+      KEYCLOAK_ADMIN_PASSWORD: "${KC_ADMIN_PASS}"
+
+  pg:
+    image: postgres:17-alpine
+    container_name: postgres-${APP_NAME}
+    init: true
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+    mem_limit: 512m
+    memswap_limit: 512m
+    networks:
+      internal:
+    environment:
+      POSTGRES_DB: ${KC_POSTGRES_DB}
+      POSTGRES_USER: ${KC_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${KC_POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+    volumes:
+      - kc-pgdata:/var/lib/postgresql/data
+
+networks:
+  external-ipv6:
+    name: dmz-${APP_NAME}-ipv6
+    driver: bridge
+    enable_ipv6: true
+    enable_ipv4: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv6: "routed"
+    ipam:
+      driver: default
+      config:
+        - subnet: "${IPV6_SUBNET}"
+          gateway: "${IPV6_GATEWAY}"
+
+  external-ipv4:
+    name: dmz-${APP_NAME}-ipv4
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: "nat"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.inhibit_ipv4: "false"
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.99.10.0/24
+
+  internal:
+    name: internal-${APP_NAME}
+    driver: bridge
+    enable_ipv6: true
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+        - subnet: fd00::/64
+
+
+volumes:
+  kc-pgdata:
+    name: "pgdata-${APP_NAME}"
+  cert-volume:
+    name: "${CERT_VOLUME}"

@@ -1,10 +1,30 @@
 FROM alpine:latest AS proxy-runtime
-RUN apk add --no-cache nginx nginx-mod-http-auth-jwt nginx-mod-http-headers-more nginx-mod-http-lua
+RUN apk add --no-cache \
+    nginx \
+    nginx-mod-http-auth-jwt \
+    nginx-mod-http-headers-more \
+    nginx-mod-http-lua \
+    nginx-mod-http-perl \
+    perl-uri \
+    perl-json \
+    perl-json-xs \
+    curl
 COPY ./nginx.conf /etc/nginx/nginx.conf
-RUN \
-    mkdir -p /etc/nginx/certs; \
+COPY ./nginx.sh /nginx.sh
+RUN ln -s /certs/ /etc/nginx/certs
+RUN <<EOngxtest
+    PERL5LIB=""
+    PERL5LIB=$PERL5LIB:/usr/lib/perl5/vendor_perl/armv8l-linux-thread-multi-64int
+    PERL5LIB=$PERL5LIB:/usr/lib/perl5/vendor_perl/x86_64-linux-thread-multi
+    export PERL5LIB
     nginx -t -c /etc/nginx/nginx.conf
-ENTRYPOINT ["/usr/sbin/nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+    err=$?
+    exit $err
+EOngxtest
+RUN mkdir -p /var/lib/nginx/logs/ && chown -R nginx:nginx /var/lib/nginx/logs/
+RUN mkdir -p /run/nginx/ && chown -R nginx:nginx /run/nginx/
+USER nginx
+ENTRYPOINT ["/nginx.sh"]
 
 FROM registry.access.redhat.com/ubi9 AS ubi-micro-build-cert
 RUN update-ca-trust

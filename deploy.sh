@@ -1,80 +1,109 @@
 #!/bin/bash 
-export STACK_NAME=${STACK_NAME?Need STACK_NAME}
-export STACK_FILE=${STACK_FILE:-kc.yml}
-export DOCKER_REGISTRY=${DOCKER_REGISTRY?Need DOCKER_REGISTRY}
-export DOCKER_REPOSITORY=${DOCKER_REPOSITORY?Need DOCKER_REPOSITORY}
+
 export WORKSPACE=${WORKSPACE:-${BASH_SOURCE%/*}}
-export CFG_PREFIX=$STACK_NAME-$(date +%s)
-
-export KC_HTTPS_SITE_KEY=${KC_HTTPS_SITE_KEY?Need HTTPS key}
-export KC_HTTPS_SITE_CRT=${KC_HTTPS_SITE_CRT?Need HTTPS crt}
-export IAM_PROXY_HTTPS_SITE_KEY=${IAM_PROXY_HTTPS_SITE_KEY?Need HTTPS key}
-export IAM_PROXY_HTTPS_SITE_CRT=${IAM_PROXY_HTTPS_SITE_CRT?Need HTTPS crt}
-
-export PROXY_EXTERNAL_PORT=${PROXY_EXTERNAL_PORT:-443}
-export PROXY_INTERNAL_PORT=${PROXY_INTERNAL_PORT:-8443}
-export KC_HOSTNAME=${KC_HOSTNAME:-$HOSTNAME}
-
 export APP_NAME=${APP_NAME:-iam}
-
-echo $KC_HTTPS_KEY_STORE_PASSWORD
-function read_pass(){
-    local nm="$1"
-    local de="$2"
-    while [ -z "${!nm}" ]; do
-        echo -n "$de: "
-        read -s $nm
-        echo
-        if [ -z "${!nm}" ]; then
-            continue
-        fi
-    done
-    export $nm
-}
-
-read_pass KC_HTTPS_KEY_STORE_PASSWORD \
-    "Keycloak HTTPS keystore password for <$KC_HOSTNAME>"
-
-export KC_ADMIN_USER=${KC_ADMIN_USER:-kcadmin}
-read_pass KC_ADMIN_PASS \
-    "Keycloak password for <$KC_ADMIN_USER@$KC_HOSTNAME>"
-
-export KC_POSTGRES_USER=${KC_POSTGRES_USER:-kcuser}
-export KC_POSTGRES_DB=${KC_POSTGRES_DB:-kcdb}
-read_pass KC_POSTGRES_PASSWORD \
-    "Keycloak postgres DB password <$KC_POSTGRES_USER@$KC_POSTGRES_DB>"
-
-cat "$KC_HTTPS_SITE_KEY"|docker secret create \
-    kc-site.key-$CFG_PREFIX \
-    -
-cat "$KC_HTTPS_SITE_CRT"|docker secret create \
-    kc-site.crt-$CFG_PREFIX \
-    -
-cat "$IAM_PROXY_HTTPS_SITE_KEY"|docker secret create \
-    iam-proxy-https-key-$CFG_PREFIX \
-    -
-cat "$IAM_PROXY_HTTPS_SITE_CRT"|docker secret create \
-    iam-proxy-https-crt-$CFG_PREFIX \
-    -
-
-JWT_SECRET=${JWT_SECRET:-$WORKSPACE/.jwt_secret}
-if [ ! -s $JWT_SECRET ]; then
-    openssl rand 32|base64|tr '+/' '-_'|tr -d '=' > $JWT_SECRET
+export DOMAIN=${APP_DOMAIN?Need APP_DOMAIN}
+export CERT_VOLUME=${APP_CERT_VOLUME:-certs-$APP_NAME}
+IPV6=$(dig -6 $DOMAIN -t AAAA +short +retry=0 +tries=1)
+if [ $? != 0 -o -z "$IPV6" ]; then
+    echo -ne "problem looking up $DOMAIN:\n$IPV6\n"
+    exit 1
 fi
-JWT_KEY_FILE=${JWT_KEY_FILE:-$WORKSPACE/.jwt_key}
-JWK_KID=${JWK_KID:-$(uuidgen)}
-cat >$JWT_KEY_FILE <<EOF
-{"keys":[{"kty":"oct","kid":"$JWK_KID","k":"$(cat $JWT_SECRET)"}]}
-EOF
-JWT_APP_SCOPE=${JWT_APP_SCOPE:-$APP_NAME}
-export JWT_KEY_FILE JWK_KID JWT_APP_SCOPE
-docker secret create \
-    --template-driver golang \
-    api-jwk-$CFG_PREFIX \
-    $JWT_KEY_FILE
 
-docker stack deploy \
-    -c $WORKSPACE/$STACK_FILE \
-    --with-registry-auth \
-    --detach=false \
-    $STACK_NAME
+# Keycloak configuration
+export KC_HOSTNAME=${KC_HOSTNAME?Need KC_HOSTNAME}
+export KC_ADMIN_USER=${KC_ADMIN_USER:-kcadmin}
+export KC_ADMIN_PASS=${KC_ADMIN_PASS:-$(openssl rand -base64 32)}
+
+# Postgres configuration
+export KC_POSTGRES_DB=${KC_POSTGRES_DB:-kcdb}
+export KC_POSTGRES_USER=${KC_POSTGRES_USER:-kcuser}
+export KC_POSTGRES_PASSWORD=${KC_POSTGRES_PASSWORD:-$(openssl rand -base64 32)}
+
+# Certificate paths (point to your cert/key files)
+export IAM_PROXY_HTTPS_SITE_CRT=${IAM_PROXY_HTTPS_SITE_CRT?Need IAM_PROXY_HTTPS_SITE_CRT (e.g. /path/to/auth_keycloak.crt)}
+export IAM_PROXY_HTTPS_SITE_KEY=${IAM_PROXY_HTTPS_SITE_KEY?Need IAM_PROXY_HTTPS_SITE_KEY (e.g. /path/to/auth_keycloak.key)}
+export KC_HTTPS_SITE_CRT=${KC_HTTPS_SITE_CRT?Need KC_HTTPS_SITE_CRT (e.g. /path/to/auth_keycloak.crt)}
+export KC_HTTPS_SITE_KEY=${KC_HTTPS_SITE_KEY?Need KC_HTTPS_SITE_KEY (e.g. /path/to/auth_keycloak.key)}
+
+# Keycloak keystore password
+export KC_HTTPS_KEY_STORE_PASSWORD=${KC_HTTPS_KEY_STORE_PASSWORD:-$(openssl rand -base64 32)}
+
+# Docker images
+export DOCKER_IMAGE_KC=${DOCKER_IMAGE_KC:-local/iam/kc:latest}
+export DOCKER_IMAGE_PROXY=${DOCKER_IMAGE_PROXY:-local/iam/proxy:latest}
+
+cd $WORKSPACE || exit $?
+
+# IPv6 networking (required)
+export IPV6_SUBNET=${IPV6_SUBNET?Need IPV6_SUBNET (e.g. 2001:db8:c::1:0/120)}
+export IPV6_GATEWAY=${IPV6_GATEWAY?Need IPV6_GATEWAY (e.g. 2001:db8:c::1:1)}
+export IPV6_ADDRESS=${IPV6_ADDRESS?Need IPV6_ADDRESS (e.g. 2001:db8:c::1:2)}
+nw_name=dmz-ipv6-${APP_NAME}
+
+if [ "${APP_DO_CERTBOT:-0}" -eq 1 ]; then
+    echo "checking for certificate"
+    echo "running certbot"
+    export APP_CERTBOT_MAIL=${APP_CERTBOT_MAIL?Need APP_CERTBOT_MAIL}
+    docker compose down
+    docker network rm dmz-${APP_NAME}-ipv6 2>/dev/null || true
+    docker network create \
+        --driver bridge \
+        --ipv6 \
+        --ipam-driver default \
+        --subnet "$IPV6_SUBNET" \
+        --gateway "$IPV6_GATEWAY" \
+        --opt com.docker.network.bridge.gateway_mode_ipv6="routed" \
+        --opt com.docker.network.container_iface_prefix="dmz" \
+        --opt com.docker.network.bridge.enable_icc="true" \
+        --opt com.docker.network.bridge.enable_ip_masquerade="false" \
+        --opt com.docker.network.bridge.enable_ip6_masquerade="false" \
+        --opt com.docker.network.bridge.inhibit_ipv4="true" \
+        --opt com.docker.network.driver.mtu="1500" \
+        dmz-${APP_NAME}-ipv6 || true
+    docker rm -f certbot_$APP_NAME 2>/dev/null || true
+    docker run \
+        -p 80:80 \
+        --pull=always \
+        --rm \
+        -e CERTBOT_MAIL="$APP_CERTBOT_MAIL" \
+        --network dmz-${APP_NAME}-ipv6 \
+        --ip6 $IPV6 \
+        --name certbot_$APP_NAME \
+        -v ${CERT_VOLUME}:/certs:rw \
+        ghcr.io/aardbeiplantje/certbot/certbot:${APP_CERTBOT_TAG:-latest} \
+            certonly \
+                --agree-tos \
+                --force-renewal \
+                --domains "$DOMAIN" || exit $?
+else
+    echo "no certbot"
+fi
+
+
+echo "KC_HOSTNAME=$KC_HOSTNAME"
+echo "ADMIN_USER=$KC_ADMIN_USER"
+echo "POSTGRES_DB=$KC_POSTGRES_DB"
+
+echo "building images with buildx bake"
+docker buildx bake -f docker-bake.hcl local || exit $?
+
+echo "starting with docker compose"
+APP_NAME=$APP_NAME \
+KC_HOSTNAME=$KC_HOSTNAME \
+KC_ADMIN_USER=$KC_ADMIN_USER \
+KC_ADMIN_PASS=$KC_ADMIN_PASS \
+KC_POSTGRES_DB=$KC_POSTGRES_DB \
+KC_POSTGRES_USER=$KC_POSTGRES_USER \
+KC_POSTGRES_PASSWORD=$KC_POSTGRES_PASSWORD \
+IAM_PROXY_HTTPS_SITE_CRT=$IAM_PROXY_HTTPS_SITE_CRT \
+IAM_PROXY_HTTPS_SITE_KEY=$IAM_PROXY_HTTPS_SITE_KEY \
+KC_HTTPS_SITE_CRT=$KC_HTTPS_SITE_CRT \
+KC_HTTPS_SITE_KEY=$KC_HTTPS_SITE_KEY \
+KC_HTTPS_KEY_STORE_PASSWORD=$KC_HTTPS_KEY_STORE_PASSWORD \
+DOCKER_IMAGE_KC=$DOCKER_IMAGE_KC \
+DOCKER_IMAGE_PROXY=$DOCKER_IMAGE_PROXY \
+IPV6_SUBNET=$IPV6_SUBNET \
+IPV6_GATEWAY=$IPV6_GATEWAY \
+IPV6_ADDRESS=$IPV6_ADDRESS \
+docker compose -f docker-compose.yml up -d
