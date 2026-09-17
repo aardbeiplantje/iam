@@ -27,7 +27,7 @@ services:
         soft: 1024
         hard: 1024
     healthcheck:
-      test: ["CMD", "curl", "-qsSLf", "https://qr.aardbeiplantje.link", "-o", "/dev/null"]
+      test: ["CMD", "curl", "-qsSLf", "https://iam.aardbeiplantje.link", "-o", "/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3
